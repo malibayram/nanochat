@@ -1,17 +1,17 @@
 """
 Utilities for saving and loading model/optim/state checkpoints.
 """
-import os
-import re
 import glob
 import json
 import logging
+import os
+import re
+
 import torch
 
-from nanochat.common import get_base_dir
+from nanochat.common import get_base_dir, setup_default_logging
 from nanochat.gpt import GPT, GPTConfig
 from nanochat.tokenizer import get_tokenizer
-from nanochat.common import setup_default_logging
 
 # Set up logging
 setup_default_logging()
@@ -74,6 +74,9 @@ def build_model(checkpoint_dir, step, device, phase):
         model = GPT(model_config)
     # Load the model state
     model.to_empty(device=device)
+    # On non-CUDA backends, enforce float32 for matmul stability and dtype consistency
+    if isinstance(device, torch.device) and device.type != "cuda":
+        model = model.to(dtype=torch.float32)
     model.init_weights() # note: this is dumb, but we need to init the rotary embeddings. TODO: fix model re-init
     model.load_state_dict(model_data, strict=True, assign=True)
     # Put the model in the right training phase / mode

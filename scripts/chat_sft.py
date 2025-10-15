@@ -63,7 +63,13 @@ user_config = {k: globals()[k] for k in config_keys} # possibly useful for loggi
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init()
 master_process = ddp_rank == 0
 dtype = torch.float32 if dtype == 'float32' else torch.bfloat16
-autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=dtype)
+if device.type == "cuda":
+    autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=dtype)
+elif device.type == "cpu":
+    autocast_ctx = torch.amp.autocast(device_type="cpu", dtype=dtype)
+else:
+    from contextlib import nullcontext
+    autocast_ctx = nullcontext()
 
 # wandb logging init
 use_dummy_wandb = run == "dummy" or not master_process

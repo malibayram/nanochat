@@ -2,11 +2,13 @@
 Common utilities for nanochat.
 """
 
+import logging
 import os
 import re
-import logging
+
 import torch
 import torch.distributed as dist
+
 
 class ColoredFormatter(logging.Formatter):
     """Custom formatter that adds colors to log messages."""
@@ -92,12 +94,27 @@ def get_dist_info():
 def compute_init():
     """Basic initialization that we keep doing over and over, so make common."""
 
-    # CUDA is currently required
-    assert torch.cuda.is_available(), "CUDA is needed for a distributed run atm"
+    # Determine device. Allow CPU/MPS fallback for single-process runs.
+    ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
+    if ddp:
+        # For distributed runs we currently only support CUDA/NCCL
+        assert torch.cuda.is_available(), "CUDA is needed for a distributed run atm"
+        device = torch.device("cuda", ddp_local_rank)
+        torch.cuda.set_device(device)  # make "cuda" default to this device
+        dist.init_process_group(backend="nccl", device_id=device)
+        dist.barrier()
+    else:
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            device = torch.device("mps")
+        else:
+            device = torch.device("cpu")
 
     # Reproducibility
     torch.manual_seed(42)
-    torch.cuda.manual_seed(42)
+    if device.type == "cuda":
+        torch.cuda.manual_seed(42)
     # skipping full reproducibility for now, possibly investigate slowdown later
     # torch.use_deterministic_algorithms(True)
     # torch.backends.cudnn.deterministic = True
@@ -106,18 +123,9 @@ def compute_init():
     # Precision
     torch.set_float32_matmul_precision("high") # uses tf32 instead of fp32 for matmuls
 
-    # Distributed setup: Distributed Data Parallel (DDP), optional
-    ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
-    if ddp:
-        device = torch.device("cuda", ddp_local_rank)
-        torch.cuda.set_device(device) # make "cuda" default to this device
-        dist.init_process_group(backend="nccl", device_id=device)
-        dist.barrier()
-    else:
-        device = torch.device("cuda")
-
     if ddp_rank == 0:
         logger.info(f"Distributed world size: {ddp_world_size}")
+        logger.info(f"Using device: {device}")
 
     return ddp, ddp_rank, ddp_local_rank, ddp_world_size, device
 

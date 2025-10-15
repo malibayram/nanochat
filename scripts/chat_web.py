@@ -8,16 +8,17 @@ Then open http://localhost:8000 in your browser.
 import argparse
 import json
 import os
+from contextlib import asynccontextmanager, nullcontext
+from typing import AsyncGenerator, List, Optional
+
 import torch
-from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, HTMLResponse, FileResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel
-from typing import List, Optional, AsyncGenerator
 
-from nanochat.common import compute_init
 from nanochat.checkpoint_manager import load_model
+from nanochat.common import compute_init
 from nanochat.engine import Engine
 
 parser = argparse.ArgumentParser(description='NanoChat Web Server')
@@ -32,7 +33,14 @@ parser.add_argument('--host', type=str, default='0.0.0.0', help='Host to bind th
 args = parser.parse_args()
 
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init()
-autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
+# Choose autocast context based on device. PyTorch supports autocast on CUDA/CPU;
+# for MPS we use a no-op context.
+if device.type == "cuda":
+    autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
+elif device.type == "cpu":
+    autocast_ctx = torch.amp.autocast(device_type="cpu", dtype=torch.bfloat16)
+else:
+    autocast_ctx = nullcontext()
 
 class ChatMessage(BaseModel):
     role: str
@@ -99,6 +107,15 @@ async def generate_stream(
 
     assistant_end = tokenizer.encode_special("<|assistant_end|>")
     bos = tokenizer.get_bos_token_id()
+
+    # Ensure tokens is a flat list[int]
+    if isinstance(tokens, list) and len(tokens) > 0 and isinstance(tokens[0], list):
+        # flatten one level
+        flat = []
+        for row in tokens:
+            flat.extend(row)
+        tokens = flat
+    assert isinstance(tokens, list) and (len(tokens) == 0 or isinstance(tokens[0], int)), "expecting list of ints"
 
     with autocast_ctx:
         for token_column, token_masks in engine.generate(

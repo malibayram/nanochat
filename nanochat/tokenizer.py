@@ -6,8 +6,8 @@ Two implementations are available:
 2) Our own RustBPE Tokenizer for training and tiktoken for efficient inference
 """
 
-import os
 import copy
+import os
 from functools import lru_cache
 
 SPECIAL_TOKENS = [
@@ -31,10 +31,12 @@ SPLIT_PATTERN = r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| 
 
 # -----------------------------------------------------------------------------
 # Generic GPT-4-style tokenizer based on HuggingFace Tokenizer
+from tokenizers import Regex
 from tokenizers import Tokenizer as HFTokenizer
-from tokenizers import pre_tokenizers, decoders, Regex
+from tokenizers import decoders, pre_tokenizers
 from tokenizers.models import BPE
 from tokenizers.trainers import BpeTrainer
+
 
 class HuggingFaceTokenizer:
     """Light wrapper around HuggingFace Tokenizer for some utilities"""
@@ -46,6 +48,14 @@ class HuggingFaceTokenizer:
     def from_pretrained(cls, hf_path):
         # init from a HuggingFace pretrained tokenizer (e.g. "gpt2")
         tokenizer = HFTokenizer.from_pretrained(hf_path)
+        # Ensure our SPECIAL_TOKENS exist in the vocab so encode_special works
+        try:
+            vocab_keys = set(tokenizer.get_vocab().keys())
+        except Exception:
+            vocab_keys = set()
+        to_add = [tok for tok in SPECIAL_TOKENS if tok not in vocab_keys]
+        if to_add:
+            tokenizer.add_special_tokens(to_add)
         return cls(tokenizer)
 
     @classmethod
@@ -149,8 +159,11 @@ class HuggingFaceTokenizer:
 # -----------------------------------------------------------------------------
 # Tokenizer based on rustbpe + tiktoken combo
 import pickle
-import rustbpe
+
 import tiktoken
+
+import rustbpe
+
 
 class RustBPETokenizer:
     """Light wrapper around tiktoken (for efficient inference) but train with rustbpe"""
@@ -380,16 +393,35 @@ def get_tokenizer():
     from nanochat.common import get_base_dir
     base_dir = get_base_dir()
     tokenizer_dir = os.path.join(base_dir, "tokenizer")
-    # return HuggingFaceTokenizer.from_directory(tokenizer_dir)
-    return RustBPETokenizer.from_directory(tokenizer_dir)
+    if os.path.exists(os.path.join(tokenizer_dir, "tokenizer.pkl")):
+        return RustBPETokenizer.from_directory(tokenizer_dir)
+    # Fallback: use a small pretrained tokenizer (requires internet on first run)
+    return HuggingFaceTokenizer.from_pretrained("gpt2")
 
 def get_token_bytes(device="cpu"):
     import torch
+
     from nanochat.common import get_base_dir
     base_dir = get_base_dir()
     tokenizer_dir = os.path.join(base_dir, "tokenizer")
     token_bytes_path = os.path.join(tokenizer_dir, "token_bytes.pt")
-    assert os.path.exists(token_bytes_path), f"Token bytes not found at {token_bytes_path}? It gets written by tok_train.py"
-    with open(token_bytes_path, "rb") as f:
-        token_bytes = torch.load(f, map_location=device)
-    return token_bytes
+    if os.path.exists(token_bytes_path):
+        with open(token_bytes_path, "rb") as f:
+            token_bytes = torch.load(f, map_location=device)
+        return token_bytes
+    # Fallback: approximate bytes per token using the tokenizer's decoded strings
+    tok = get_tokenizer()
+    vocab_size = tok.get_vocab_size()
+    special_set = set(tok.get_special_tokens()) if hasattr(tok, "get_special_tokens") else set()
+    # Build a rough bytes-per-token tensor
+    token_bytes_list = []
+    for token_id in range(vocab_size):
+        try:
+            token_str = tok.decode([token_id])
+        except Exception:
+            token_str = ""
+        if token_str in special_set:
+            token_bytes_list.append(0)
+        else:
+            token_bytes_list.append(len(token_str.encode("utf-8")))
+    return torch.tensor(token_bytes_list, dtype=torch.int32, device=device)

@@ -11,6 +11,10 @@ This repo is a full-stack implementation of an LLM like ChatGPT in a single, cle
 The fastest way to feel the magic is to run the speedrun script [speedrun.sh](speedrun.sh), which trains and inferences the $100 tier of nanochat. On an 8XH100 node at $24/hr, this gives a total run time of about 4 hours. Boot up a new 8XH100 GPU box from your favorite provider (e.g. I use and like [Lambda](https://lambda.ai/service/gpu-cloud)), and kick off the training script:
 
 ```bash
+uv run --python 3.10 python -m scripts.chat_sft --source=mid --model_tag=d2 --step=1 --num_epochs=1 --max_iterations=50 --device_batch_size=1 --target_examples_per_step=1 --eval_every=25 --eval_steps=2 --eval_metrics_every=1000000
+```
+
+```bash
 bash speedrun.sh
 ```
 
@@ -44,15 +48,15 @@ You can also `cat report.md` file which appeared in the project directory and co
 - Tokens (approx): 83,497
 - Dependencies (uv.lock lines): 2,004
 
-| Metric          | BASE     | MID      | SFT      | RL       |
-|-----------------|----------|----------|----------|----------|
-| CORE            | 0.2219   | -        | -        | -        |
-| ARC-Challenge   | -        | 0.2875   | 0.2807   | -        |
-| ARC-Easy        | -        | 0.3561   | 0.3876   | -        |
-| GSM8K           | -        | 0.0250   | 0.0455   | 0.0758   |
-| HumanEval       | -        | 0.0671   | 0.0854   | -        |
-| MMLU            | -        | 0.3111   | 0.3151   | -        |
-| ChatCORE        | -        | 0.0730   | 0.0884   | -        |
+| Metric        | BASE   | MID    | SFT    | RL     |
+| ------------- | ------ | ------ | ------ | ------ |
+| CORE          | 0.2219 | -      | -      | -      |
+| ARC-Challenge | -      | 0.2875 | 0.2807 | -      |
+| ARC-Easy      | -      | 0.3561 | 0.3876 | -      |
+| GSM8K         | -      | 0.0250 | 0.0455 | 0.0758 |
+| HumanEval     | -      | 0.0671 | 0.0854 | -      |
+| MMLU          | -      | 0.3111 | 0.3151 | -      |
+| ChatCORE      | -      | 0.0730 | 0.0884 | -      |
 
 Total wall clock time: 3h51m
 

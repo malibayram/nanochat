@@ -12,16 +12,17 @@ Notable features:
 """
 
 import math
-from functools import partial
 from dataclasses import dataclass
+from functools import partial
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from nanochat.common import get_dist_info, print0
-from nanochat.muon import Muon, DistMuon
 from nanochat.adamw import DistAdamW
+from nanochat.common import get_dist_info, print0
+from nanochat.muon import DistMuon, Muon
+
 
 @dataclass
 class GPTConfig:
@@ -111,14 +112,26 @@ class CausalSelfAttention(nn.Module):
             y = F.scaled_dot_product_attention(q, k, v, is_causal=False)
         else:
             # During inference AND we have a chunk of queries in this forward pass:
-            # First, each query attends to all the cached keys/values (i.e. full prefix)
-            attn_mask = torch.zeros((Tq, Tk), dtype=torch.bool, device=q.device) # True = keep, False = mask
-            prefix_len = Tk - Tq
-            if prefix_len > 0: # can't be negative but could be zero
-                attn_mask[:, :prefix_len] = True
-            # Then, causal attention within this chunk
-            attn_mask[:, prefix_len:] = torch.tril(torch.ones((Tq, Tq), dtype=torch.bool, device=q.device))
-            y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+            # MPS backend can be fragile with boolean attn_mask in SDPA; do per-step attention
+            if q.device.type == "mps":
+                if Tq == 0:
+                    y = q.new_empty((q.size(0), q.size(1), 0, q.size(3)))
+                else:
+                    ys = []
+                    for t in range(Tq):
+                        qt = q[:, :, t:t+1, :]
+                        yt = F.scaled_dot_product_attention(qt, k, v, is_causal=False)
+                        ys.append(yt)
+                    y = torch.cat(ys, dim=2) if len(ys) > 0 else q.new_empty((q.size(0), q.size(1), 0, q.size(3)))
+            else:
+                # First, each query attends to all the cached keys/values (i.e. full prefix)
+                attn_mask = torch.zeros((Tq, Tk), dtype=torch.bool, device=q.device) # True = keep, False = mask
+                prefix_len = Tk - Tq
+                if prefix_len > 0: # can't be negative but could be zero
+                    attn_mask[:, :prefix_len] = True
+                # Then, causal attention within this chunk
+                attn_mask[:, prefix_len:] = torch.tril(torch.ones((Tq, Tq), dtype=torch.bool, device=q.device))
+                y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
 
         # Re-assemble the heads side by side and project back to residual stream
         y = y.transpose(1, 2).contiguous().view(B, T, -1)
