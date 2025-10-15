@@ -78,6 +78,9 @@ class CausalSelfAttention(nn.Module):
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
 
     def forward(self, x, cos_sin, kv_cache):
+        # If sequence length is zero, noop (can occur in edge streaming cases)
+        if x.size(1) == 0:
+            return x
         B, T, C = x.size()
 
         # Project the input to get queries, keys, and values
@@ -159,6 +162,9 @@ class Block(nn.Module):
         self.mlp = MLP(config)
 
     def forward(self, x, cos_sin, kv_cache):
+        # Early return on empty sequence
+        if x.size(1) == 0:
+            return x
         x = x + self.attn(norm(x), cos_sin, kv_cache)
         x = x + self.mlp(norm(x))
         return x
@@ -286,17 +292,20 @@ class GPT(nn.Module):
     def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean'):
         B, T = idx.size()
 
+        # Determine the rotary position we need to support (prefill offset + current tokens)
+        T0 = 0 if kv_cache is None else kv_cache.get_pos()
+        seq_len_needed = T if kv_cache is None else T0 + T
+
         # Ensure rotary embeddings cache is long enough; grow dynamically if needed
-        if T > self.cos.size(1):
+        if seq_len_needed > self.cos.size(1):
             head_dim = self.config.n_embd // self.config.n_head
-            new_len = max(self.cos.size(1) * 2, T)
+            new_len = max(self.cos.size(1) * 2, seq_len_needed)
             cos, sin = self._precompute_rotary_embeddings(new_len, head_dim, device=self.transformer.wte.weight.device)
             self.cos, self.sin = cos, sin
         # Grab the rotary embeddings for the current sequence length (they are of shape (1, seq_len, 1, head_dim))
         assert idx.device == self.cos.device, f"Rotary embeddings and idx are on different devices: {idx.device} != {self.cos.device}"
         assert self.cos.dtype == torch.bfloat16, "Rotary embeddings must be in bfloat16"
         # if kv cache exists, we need to offset the rotary embeddings to the current position in the cache
-        T0 = 0 if kv_cache is None else kv_cache.get_pos()
         cos_sin = self.cos[:, T0:T0+T], self.sin[:, T0:T0+T] # truncate cache to current sequence length
 
         # Forward the trunk of the Transformer

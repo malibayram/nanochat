@@ -11,14 +11,17 @@ Notes:
 The whole thing is made as efficient as possible.
 """
 
-import torch
-import torch.nn.functional as F
 import signal
 import warnings
-from contextlib import contextmanager
 from collections import deque
-from nanochat.common import compute_init
+from contextlib import contextmanager
+
+import torch
+import torch.nn.functional as F
+
 from nanochat.checkpoint_manager import load_model
+from nanochat.common import compute_init
+
 
 # -----------------------------------------------------------------------------
 # Calculator tool helpers
@@ -223,7 +226,12 @@ class Engine:
                 first_iteration = False
             else:
                 # Forward the model and get the next token for each row
+                # If there are no active rows, stop generation
+                if ids.numel() == 0:
+                    break
                 logits = self.model.forward(ids, kv_cache=kv_cache_decode)  # (B, T, vocab_size)
+                if logits.numel() == 0:
+                    break
                 logits = logits[:, -1, :]  # (B, vocab_size) at last time step
                 next_ids = sample_next_token(logits, rng, temperature, top_k)  # (B, 1)
                 sampled_tokens = next_ids[:, 0].tolist()
@@ -297,6 +305,7 @@ if __name__ == "__main__":
     is equivalent to the faster Engine.generate function here.
     """
     import time
+
     # init compute
     ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init()
     # load the model and tokenizer

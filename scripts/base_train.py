@@ -177,6 +177,7 @@ def get_muon_momentum(it):
 # -----------------------------------------------------------------------------
 # Training loop
 min_val_bpb = float("inf")
+results = {"core_metric": 0.0, "centered_results": {}}
 smooth_train_loss = 0 # EMA of training loss
 ema_beta = 0.9 # EMA decay factor
 total_training_time = 0 # total wall-clock time of training
@@ -207,15 +208,20 @@ for step in range(num_iterations + 1):
     # use the original uncompiled model because the inputs keep changing shape
     if last_step or (step > 0 and step % core_metric_every == 0):
         model.eval()
-        with autocast_ctx:
-            results = evaluate_model(orig_model, tokenizer, device, max_per_task=core_metric_max_per_task)
-        print0(f"Step {step:05d} | CORE metric: {results['core_metric']:.4f}")
-        wandb_run.log({
-            "step": step,
-            "total_training_flops": flops_so_far,
-            "core_metric": results["core_metric"],
-            "centered_results": results["centered_results"],
-        })
+        import os as _os
+        eval_cfg = _os.path.join(get_base_dir(), "eval_bundle", "core.yaml")
+        if _os.path.exists(eval_cfg):
+            with autocast_ctx:
+                results = evaluate_model(orig_model, tokenizer, device, max_per_task=core_metric_max_per_task)
+            print0(f"Step {step:05d} | CORE metric: {results['core_metric']:.4f}")
+            wandb_run.log({
+                "step": step,
+                "total_training_flops": flops_so_far,
+                "core_metric": results["core_metric"],
+                "centered_results": results["centered_results"],
+            })
+        else:
+            print0("Skipping CORE eval (eval_bundle missing); continuing training")
         model.train()
 
     # once in a while: sample from the model (only on master process)
@@ -342,7 +348,7 @@ get_report().log(section="Base model training", data=[
     { # stats about training outcomes
         "Minimum validation bpb": min_val_bpb,
         "Final validation bpb": val_bpb,
-        "CORE metric estimate": results["core_metric"],
+        "CORE metric estimate": results.get("core_metric", 0.0),
         "MFU %": f"{mfu:.2f}%",
         "Total training flops": f"{flops_so_far:e}",
         "Total training time": f"{total_training_time/60:.2f}m",
