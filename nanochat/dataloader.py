@@ -6,6 +6,7 @@ from nanochat.common import get_dist_info
 from nanochat.dataset import parquets_iter_batched
 from nanochat.tokenizer import get_tokenizer
 
+
 def tokenizing_distributed_data_loader(B, T, split, tokenizer_threads=4, tokenizer_batch_size=128):
     """Stream pretraining text from parquet files, tokenize, yield training batches."""
     assert split in ["train", "val"], "split must be 'train' or 'val'"
@@ -16,7 +17,9 @@ def tokenizing_distributed_data_loader(B, T, split, tokenizer_threads=4, tokeniz
     bos_token = tokenizer.get_bos_token_id()
     # scratch buffer holds the tokens for one iteration
     token_buffer = deque() # we stream tokens on the right and pop from the left
-    scratch = torch.empty(needed_tokens, dtype=torch.int64, pin_memory=True)
+    # pin_memory only on CUDA; MPS/CPU pinning can trigger backend asserts
+    pin = torch.cuda.is_available()
+    scratch = torch.empty(needed_tokens, dtype=torch.int64, pin_memory=pin)
 
     # infinite iterator over document batches
     def document_batches():
@@ -43,7 +46,13 @@ def tokenizing_distributed_data_loader(B, T, split, tokenizer_threads=4, tokeniz
         # Create the inputs/targets as 1D tensors
         inputs_cpu = scratch[:-1].to(dtype=torch.int32)
         targets_cpu = scratch[1:]
-        # Reshape to 2D and move to GPU async
-        inputs = inputs_cpu.view(B, T).to(device="cuda", dtype=torch.int32, non_blocking=True)
-        targets = targets_cpu.view(B, T).to(device="cuda", dtype=torch.int64, non_blocking=True)
+        # Reshape to 2D and move to active device
+        inputs = inputs_cpu.view(B, T)
+        targets = targets_cpu.view(B, T)
+        if torch.cuda.is_available():
+            inputs = inputs.to(device="cuda", dtype=torch.int32, non_blocking=True)
+            targets = targets.to(device="cuda", dtype=torch.int64, non_blocking=True)
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            inputs = inputs.to(device="mps", dtype=torch.int32)
+            targets = targets.to(device="mps", dtype=torch.int64)
         yield inputs, targets

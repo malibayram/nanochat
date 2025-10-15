@@ -95,7 +95,7 @@ val_ds = SmolTalk(split="test") # general conversations, 24K rows (though we don
 # -----------------------------------------------------------------------------
 # DataLoader
 
-def sft_data_generator(dataset, batch_size):
+def sft_data_generator(dataset, batch_size, max_seq_len):
     pad_token_id = tokenizer.encode_special("<|assistant_end|>") # use <|assistant_end|> as the pad token is ok, these positions are masked in the loss
     # prepares a list of tokenized conversations into a batch and yields
     def collate_and_yield(batch):
@@ -122,6 +122,10 @@ def sft_data_generator(dataset, batch_size):
         for i in range(ddp_rank, len(dataset), ddp_world_size):
             doc = dataset[i]
             ids, mask = tokenizer.render_conversation(doc)
+            # Crop to fit the model context window
+            if len(ids) > max_seq_len:
+                ids = ids[-max_seq_len:]
+                mask = mask[-max_seq_len:]
             batch.append((ids, mask))
             if len(batch) == batch_size:
                 yield collate_and_yield(batch)
@@ -139,8 +143,8 @@ num_iterations = (len(train_ds) // target_examples_per_step) * num_epochs
 if max_iterations >= 0 and num_iterations > max_iterations:
     print0(f"Number of iterations is too high: {num_iterations}, capping to {max_iterations}")
     num_iterations = max_iterations
-train_loader = sft_data_generator(train_ds, batch_size=device_batch_size)
-build_val_loader = lambda: sft_data_generator(val_ds, batch_size=device_batch_size)
+train_loader = sft_data_generator(train_ds, batch_size=device_batch_size, max_seq_len=model.config.sequence_len)
+build_val_loader = lambda: sft_data_generator(val_ds, batch_size=device_batch_size, max_seq_len=model.config.sequence_len)
 
 # -----------------------------------------------------------------------------
 # Initialize the Optimizer

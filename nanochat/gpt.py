@@ -182,8 +182,9 @@ class GPT(nn.Module):
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
         self.register_buffer("cos", cos, persistent=False) # persistent=False means it's not saved to the checkpoint
         self.register_buffer("sin", sin, persistent=False)
-        # Cast the embeddings from fp32 to bf16: optim can tolerate it and it saves memory: both in the model and the activations
-        self.transformer.wte.to(dtype=torch.bfloat16)
+        # Cast embedding precision depending on backend: use bf16 on CUDA, keep fp32 on MPS/CPU for stability
+        if torch.cuda.is_available():
+            self.transformer.wte.to(dtype=torch.bfloat16)
 
     def init_weights(self):
         self.apply(self._init_weights)
@@ -256,14 +257,27 @@ class GPT(nn.Module):
             dict(params=embedding_params, lr=embedding_lr * dmodel_lr_scale),
         ]
         adamw_kwargs = dict(betas=(0.8, 0.95), eps=1e-10, weight_decay=weight_decay)
-        AdamWFactory = DistAdamW if ddp else partial(torch.optim.AdamW, fused=True)
+        # fused AdamW not supported on CPU/MPS; only enable on CUDA non-DDP
+        if ddp:
+            AdamWFactory = DistAdamW
+        else:
+            if torch.cuda.is_available():
+                AdamWFactory = partial(torch.optim.AdamW, fused=True)
+            else:
+                AdamWFactory = torch.optim.AdamW
         adamw_optimizer = AdamWFactory(adam_groups, **adamw_kwargs)
         # Create the Muon optimizer for the linear layers
-        muon_kwargs = dict(lr=matrix_lr, momentum=0.95)
-        MuonFactory = DistMuon if ddp else Muon
-        muon_optimizer = MuonFactory(matrix_params, **muon_kwargs)
+        # On MPS/CPU, avoid Muon to sidestep Torch Inductor compile issues
+        if (not torch.cuda.is_available()) and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            matrix_optimizer = torch.optim.AdamW(matrix_params, lr=matrix_lr, betas=(0.9, 0.999), eps=1e-8, weight_decay=weight_decay)
+        elif not torch.cuda.is_available():
+            matrix_optimizer = torch.optim.AdamW(matrix_params, lr=matrix_lr, betas=(0.9, 0.999), eps=1e-8, weight_decay=weight_decay)
+        else:
+            muon_kwargs = dict(lr=matrix_lr, momentum=0.95)
+            MuonFactory = DistMuon if ddp else Muon
+            matrix_optimizer = MuonFactory(matrix_params, **muon_kwargs)
         # Combine them the two optimizers into one list
-        optimizers = [adamw_optimizer, muon_optimizer]
+        optimizers = [adamw_optimizer, matrix_optimizer]
         for opt in optimizers:
             for group in opt.param_groups:
                 group["initial_lr"] = group["lr"]
@@ -272,8 +286,13 @@ class GPT(nn.Module):
     def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean'):
         B, T = idx.size()
 
+        # Ensure rotary embeddings cache is long enough; grow dynamically if needed
+        if T > self.cos.size(1):
+            head_dim = self.config.n_embd // self.config.n_head
+            new_len = max(self.cos.size(1) * 2, T)
+            cos, sin = self._precompute_rotary_embeddings(new_len, head_dim, device=self.transformer.wte.weight.device)
+            self.cos, self.sin = cos, sin
         # Grab the rotary embeddings for the current sequence length (they are of shape (1, seq_len, 1, head_dim))
-        assert T <= self.cos.size(1), f"Sequence length grew beyond the rotary embeddings cache: {T} > {self.cos.size(1)}"
         assert idx.device == self.cos.device, f"Rotary embeddings and idx are on different devices: {idx.device} != {self.cos.device}"
         assert self.cos.dtype == torch.bfloat16, "Rotary embeddings must be in bfloat16"
         # if kv cache exists, we need to offset the rotary embeddings to the current position in the cache
